@@ -1,0 +1,17 @@
+# Compiled binaries
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test binary, output of `go test -c`
+*.test
+
+# Go build/coverage output
+*.out
+
+# Dependency dir (if ever vendored)
+/vendor/
+
+# OS / editor cruft
+.DS_Store
