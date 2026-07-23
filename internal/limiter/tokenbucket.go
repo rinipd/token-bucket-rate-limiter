@@ -1,6 +1,9 @@
 package limiter
 
-import "time"
+import (
+	"sync"
+	"time"
+)
 
 // TokenBucket is a single-bucket rate limiter using the token bucket algorithm.
 //
@@ -13,9 +16,12 @@ import "time"
 // accrued since the last refill at the moment a request arrives. This keeps
 // the type free of goroutines and timers.
 //
-// NOTE: this type is NOT safe for concurrent use — synchronization is a later
-// phase.
+// TokenBucket is safe for concurrent use: mu serializes the refill-check-
+// consume sequence in Allow so concurrent callers can't observe or clobber
+// each other's partial updates to tokens/lastRefill.
 type TokenBucket struct {
+	mu sync.Mutex // protects tokens and lastRefill below
+
 	tokens     float64 // current number of tokens available (fractional)
 	lastRefill time.Time
 	capacity   float64 // maximum tokens the bucket can hold (max burst size)
@@ -54,6 +60,12 @@ func NewTokenBucket(capacity, refillRate float64) *TokenBucket {
 // After refilling, if at least one whole token is available we subtract one and
 // ALLOW the request; otherwise we leave the token count untouched and DENY.
 func (b *TokenBucket) Allow() bool {
+	// Lock for the whole refill-check-consume sequence so it executes as one
+	// atomic unit; otherwise concurrent callers could interleave reads/writes
+	// of tokens and lastRefill and double-spend tokens.
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
 	now := b.now()
 
 	// Add the tokens that have accrued since the last refill, capped at
