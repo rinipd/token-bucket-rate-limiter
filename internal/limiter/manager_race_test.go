@@ -7,25 +7,28 @@ import (
 )
 
 // TestManager_ConcurrentSameClient hammers a single client's bucket from many
-// goroutines at once. Manager is deliberately unsynchronized (see manager.go),
-// so this test demonstrates the resulting data race: concurrent goroutines
-// can race on both the lazy bucket-creation check and the bucket's own
-// internal state.
+// goroutines at once, exercising Manager's two-level locking (map access
+// serialized by Manager.mu, token accounting serialized by the bucket's own
+// mutex).
 //
-// With refillRate 0, no tokens are ever added back, so a correctly
-// synchronized limiter would allow exactly `capacity` (100) of the 1000
-// concurrent requests. Under the current unsynchronized implementation this
-// assertion may fail, and `go test -race` should flag the race directly —
-// both outcomes are the expected result of this step, not a bug to fix here.
+// With a vanishingly small RPS (see noRefillRPS below), effectively no tokens
+// are added back during the test, so exactly `capacity` (100) of the 1000
+// concurrent requests should be allowed.
 func TestManager_ConcurrentSameClient(t *testing.T) {
 	const (
 		clientID   = "client-1"
 		capacity   = 100
-		refillRate = 0 // no refill during the test
 		numCallers = 1000
 	)
 
 	m := NewManager()
+	// Validate() rejects RPS <= 0, so use a vanishingly small (but positive)
+	// RPS: over the test's runtime this adds a negligible fraction of a
+	// token, which is indistinguishable from "no refill" for this assertion.
+	const noRefillRPS = 1e-9
+	if err := m.SetConfig(clientID, Config{RPS: noRefillRPS, Burst: capacity, Algorithm: AlgorithmTokenBucket}); err != nil {
+		t.Fatalf("SetConfig: %v", err)
+	}
 
 	var wg sync.WaitGroup
 	var allowedCount int64
@@ -34,7 +37,7 @@ func TestManager_ConcurrentSameClient(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if m.Allow(clientID, capacity, refillRate) {
+			if m.Allow(clientID) {
 				atomic.AddInt64(&allowedCount, 1)
 			}
 		}()
