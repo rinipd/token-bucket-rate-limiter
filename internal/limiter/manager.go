@@ -63,12 +63,12 @@ func (m *Manager) RemoveClient(clientID string) {
 	delete(m.buckets, clientID)
 }
 
-// Allow reports whether a request for clientID may proceed, consuming a
-// token from that client's bucket. The client's rate limit comes from its
-// stored Config (or DefaultConfig if none was set via SetConfig). If
-// clientID has no bucket yet, one is created from that config and stored for
-// future calls.
-func (m *Manager) Allow(clientID string) bool {
+// Allow reports the outcome of a request for clientID, consuming a token
+// from that client's bucket if the request is allowed. The client's rate
+// limit comes from its stored Config (or DefaultConfig if none was set via
+// SetConfig). If clientID has no bucket yet, one is created from that config
+// and stored for future calls.
+func (m *Manager) Allow(clientID string) Decision {
 	// Hold m.mu only for the get-or-create of the config and bucket: this is
 	// the part that touches shared state (the maps), so it must be atomic or
 	// two goroutines could both see "absent" and create/store two different

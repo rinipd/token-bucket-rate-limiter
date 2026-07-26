@@ -31,6 +31,11 @@ func main() {
 	admin := httpapi.NewAdminHandler(mgr)
 	admin.Register(mux)
 
+	// Register the rate-limit check API (GET /check/{key}), which consumes a
+	// token for the given client and reports the outcome via headers.
+	check := httpapi.NewCheckHandler(mgr)
+	check.Register(mux)
+
 	// Announce that the server is starting and where it's listening.
 	log.Printf("server listening on %s", addr)
 

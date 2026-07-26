@@ -44,7 +44,7 @@ func TestAllow_BurstThenDeny(t *testing.T) {
 			// be allowed (the initial full burst).
 			allowed := 0
 			for i := 0; i < int(tt.capacity); i++ {
-				if !b.Allow() {
+				if !b.Allow().Allowed {
 					t.Fatalf("request %d: got DENY, want ALLOW", i+1)
 				}
 				allowed++
@@ -55,7 +55,7 @@ func TestAllow_BurstThenDeny(t *testing.T) {
 			}
 
 			// The next request drains past the bucket and must be denied.
-			if b.Allow() {
+			if b.Allow().Allowed {
 				t.Fatalf("request after burst: got ALLOW, want DENY")
 			}
 		})
@@ -101,11 +101,11 @@ func TestAllow_RefillAfterTime(t *testing.T) {
 
 			// Drain the initial full burst so the bucket is empty.
 			for i := 0; i < int(tt.capacity); i++ {
-				if !b.Allow() {
+				if !b.Allow().Allowed {
 					t.Fatalf("drain request %d: got DENY, want ALLOW", i+1)
 				}
 			}
-			if b.Allow() {
+			if b.Allow().Allowed {
 				t.Fatalf("bucket should be empty but allowed a request")
 			}
 
@@ -114,7 +114,7 @@ func TestAllow_RefillAfterTime(t *testing.T) {
 
 			// Count how many requests are allowed now.
 			allowed := 0
-			for b.Allow() {
+			for b.Allow().Allowed {
 				allowed++
 			}
 

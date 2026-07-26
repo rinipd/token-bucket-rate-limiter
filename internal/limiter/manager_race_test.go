@@ -37,7 +37,7 @@ func TestManager_ConcurrentSameClient(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if m.Allow(clientID) {
+			if m.Allow(clientID).Allowed {
 				atomic.AddInt64(&allowedCount, 1)
 			}
 		}()
