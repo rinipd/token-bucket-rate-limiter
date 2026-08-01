@@ -49,6 +49,32 @@ func NewTokenBucket(capacity, refillRate float64) *TokenBucket {
 	}
 }
 
+// State returns a snapshot of b's serializable data, safe to call
+// concurrently with Allow.
+func (b *TokenBucket) State() BucketState {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return BucketState{
+		Tokens:     b.tokens,
+		LastRefill: b.lastRefill,
+		Capacity:   b.capacity,
+		RefillRate: b.refillRate,
+	}
+}
+
+// NewTokenBucketFromState reconstructs a live bucket from a previously
+// captured BucketState, wiring it to the real time.Now clock (the state
+// itself has no clock to restore, since functions aren't serializable).
+func NewTokenBucketFromState(s BucketState) *TokenBucket {
+	return &TokenBucket{
+		tokens:     s.Tokens,
+		lastRefill: s.LastRefill,
+		capacity:   s.Capacity,
+		refillRate: s.RefillRate,
+		now:        time.Now,
+	}
+}
+
 // Allow reports the outcome of a request against this bucket, consuming a
 // token if one is available. See Decision for the meaning of each field.
 //

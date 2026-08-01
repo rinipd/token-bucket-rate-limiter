@@ -93,3 +93,54 @@ func (m *Manager) Allow(clientID string) Decision {
 	// clients.
 	return b.Allow()
 }
+
+// Snapshot captures the current configs and bucket states as a
+// PersistedState, suitable for writing to disk (see the store package).
+//
+// Lock ordering: m.mu is held only long enough to copy the configs map and
+// collect the *TokenBucket pointers, then released before calling each
+// bucket's State(). Bucket.State() takes that bucket's own mutex, so calling
+// it while still holding m.mu would mean acquiring two locks at once — for
+// no benefit, since the buckets map itself isn't touched again afterward,
+// and it would block unrelated Allow calls (which briefly need m.mu) for the
+// entire duration of every bucket read instead of just the map copy.
+func (m *Manager) Snapshot() PersistedState {
+	m.mu.Lock()
+	configs := make(map[string]Config, len(m.configs))
+	for id, cfg := range m.configs {
+		configs[id] = cfg
+	}
+	buckets := make(map[string]*TokenBucket, len(m.buckets))
+	for id, b := range m.buckets {
+		buckets[id] = b
+	}
+	m.mu.Unlock()
+
+	bucketStates := make(map[string]BucketState, len(buckets))
+	for id, b := range buckets {
+		bucketStates[id] = b.State()
+	}
+
+	return PersistedState{
+		Configs: configs,
+		Buckets: bucketStates,
+	}
+}
+
+// Restore replaces m's configs and buckets with those captured in s,
+// reconstructing a live *TokenBucket for each persisted BucketState.
+func (m *Manager) Restore(s PersistedState) {
+	configs := make(map[string]Config, len(s.Configs))
+	for id, cfg := range s.Configs {
+		configs[id] = cfg
+	}
+	buckets := make(map[string]*TokenBucket, len(s.Buckets))
+	for id, bs := range s.Buckets {
+		buckets[id] = NewTokenBucketFromState(bs)
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.configs = configs
+	m.buckets = buckets
+}

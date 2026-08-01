@@ -15,3 +15,8 @@
 
 # OS / editor cruft
 .DS_Store
+
+# Runtime state snapshots
+*.snapshot.json
+snapshot.json
+state.json
