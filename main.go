@@ -1,12 +1,53 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net/http"
+	"os"
+	"os/signal"
+	"strconv"
+	"syscall"
+	"time"
 
 	"github.com/rinipd/token-bucket-rate-limiter/internal/httpapi"
 	"github.com/rinipd/token-bucket-rate-limiter/internal/limiter"
+	"github.com/rinipd/token-bucket-rate-limiter/internal/store"
 )
+
+// serverConfig holds the environment-configurable settings for main.
+type serverConfig struct {
+	addr             string        // ADDR: address the HTTP server binds to
+	snapshotPath     string        // SNAPSHOT_PATH: file the Manager's state is persisted to
+	snapshotInterval time.Duration // SNAPSHOT_INTERVAL_SECS: how often to snapshot in the background
+}
+
+// loadConfig reads serverConfig from the environment, falling back to
+// sensible defaults when a variable is unset or (for the interval) unparsable.
+func loadConfig() serverConfig {
+	cfg := serverConfig{
+		addr:             ":8080",
+		snapshotPath:     "state.json",
+		snapshotInterval: 5 * time.Second,
+	}
+
+	if v := os.Getenv("ADDR"); v != "" {
+		cfg.addr = v
+	}
+	if v := os.Getenv("SNAPSHOT_PATH"); v != "" {
+		cfg.snapshotPath = v
+	}
+	if v := os.Getenv("SNAPSHOT_INTERVAL_SECS"); v != "" {
+		secs, err := strconv.Atoi(v)
+		if err != nil {
+			log.Printf("invalid SNAPSHOT_INTERVAL_SECS %q, using default %v: %v", v, cfg.snapshotInterval, err)
+		} else {
+			cfg.snapshotInterval = time.Duration(secs) * time.Second
+		}
+	}
+
+	return cfg
+}
 
 // healthHandler responds to health-check requests with a plain-text "OK".
 // It's used to prove the server is up and reachable.
@@ -16,32 +57,122 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("OK"))
 }
 
+// restoreState loads a prior snapshot from path (if any) into mgr. A missing
+// file is expected on first run and isn't logged as an error; any other load
+// failure is logged but not fatal — the server starts with empty state
+// rather than refusing to start over a corrupt or unreadable snapshot.
+func restoreState(mgr *limiter.Manager, path string) {
+	snap, err := store.Load(path)
+	if err != nil {
+		log.Printf("failed to load snapshot from %s, starting with empty state: %v", path, err)
+		return
+	}
+	mgr.Restore(snap)
+	log.Printf("restored %d client config(s) and %d bucket(s) from %s", len(snap.Configs), len(snap.Buckets), path)
+}
+
+// snapshotOnce captures mgr's current state and writes it to path, logging
+// the outcome. Errors are logged, not returned: a failed snapshot shouldn't
+// take down the server, since the previous on-disk snapshot (or none, on
+// first run) is still a valid fallback.
+func snapshotOnce(mgr *limiter.Manager, path string) {
+	snap := mgr.Snapshot()
+	if err := store.Save(path, snap); err != nil {
+		log.Printf("warning: failed to save snapshot to %s: %v", path, err)
+		return
+	}
+	log.Printf("saved snapshot (%d config(s), %d bucket(s)) to %s", len(snap.Configs), len(snap.Buckets), path)
+}
+
+// runSnapshotter periodically snapshots mgr to path until ctx is cancelled.
+// It's meant to run in its own goroutine; the periodic snapshots bound how
+// much state could be lost to an unclean exit (process kill, crash) to
+// roughly one interval, on top of the always-taken final snapshot on
+// graceful shutdown.
+func runSnapshotter(ctx context.Context, mgr *limiter.Manager, path string, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			snapshotOnce(mgr, path)
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
 func main() {
-	// The address the server binds to (all interfaces, port 8080).
-	const addr = ":8080"
+	cfg := loadConfig()
+
+	// Create the Manager and recover any state persisted by a previous run
+	// before the server starts serving traffic.
+	mgr := limiter.NewManager()
+	restoreState(mgr, cfg.snapshotPath)
 
 	// Register the health-check route.
 	// The "GET /health" pattern (Go 1.22+) matches only GET requests.
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", healthHandler)
 
-	// Create the rate limiter Manager and register the admin API
-	// (PUT/GET/DELETE /admin/clients/{key}) for managing per-client config.
-	mgr := limiter.NewManager()
-	admin := httpapi.NewAdminHandler(mgr)
-	admin.Register(mux)
+	// Register the admin API (PUT/GET/DELETE /admin/clients/{key}) for
+	// managing per-client config.
+	httpapi.NewAdminHandler(mgr).Register(mux)
 
 	// Register the rate-limit check API (GET /check/{key}), which consumes a
 	// token for the given client and reports the outcome via headers.
-	check := httpapi.NewCheckHandler(mgr)
-	check.Register(mux)
+	httpapi.NewCheckHandler(mgr).Register(mux)
 
-	// Announce that the server is starting and where it's listening.
-	log.Printf("server listening on %s", addr)
-
-	// Start the server; ListenAndServe blocks until the server stops.
-	// If it returns an error (e.g. port already in use), log it and exit.
-	if err := http.ListenAndServe(addr, mux); err != nil {
-		log.Fatalf("server failed: %v", err)
+	server := &http.Server{
+		Addr:    cfg.addr,
+		Handler: mux,
 	}
+
+	// ctx is cancelled the moment the process receives SIGINT (Ctrl+C) or
+	// SIGTERM (e.g. `docker stop`, `kill`). Everything below that needs to
+	// react to shutdown — the snapshotter and the shutdown sequence at the
+	// end of main — watches this same ctx, so one signal drives the whole
+	// shutdown path.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	// The HTTP server runs in its own goroutine because ListenAndServe
+	// blocks until the server stops; main needs its goroutine free to block
+	// on <-ctx.Done() instead, so it can notice the shutdown signal and start
+	// the shutdown sequence below.
+	go func() {
+		log.Printf("server listening on %s", cfg.addr)
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			// ErrServerClosed is the expected return value once
+			// server.Shutdown has been called; anything else is a real
+			// failure to start/keep serving.
+			log.Fatalf("server failed: %v", err)
+		}
+	}()
+
+	// Snapshot in the background at the configured interval so state
+	// survives an unclean exit, not just a graceful one.
+	go runSnapshotter(ctx, mgr, cfg.snapshotPath, cfg.snapshotInterval)
+
+	// Block until the shutdown signal arrives.
+	<-ctx.Done()
+	log.Printf("shutdown signal received, shutting down")
+
+	// Give in-flight requests a bounded window to finish instead of cutting
+	// them off immediately. This uses a fresh context (not ctx, which is
+	// already cancelled) so Shutdown gets its own deadline rather than
+	// returning instantly.
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		log.Printf("server shutdown error: %v", err)
+	}
+
+	// Take one last snapshot on the way out: the periodic snapshotter above
+	// already stopped (ctx is done), so without this final snapshot, any
+	// state changed since the last tick would be lost even on a clean exit.
+	snapshotOnce(mgr, cfg.snapshotPath)
+
+	log.Printf("shutdown complete")
 }
