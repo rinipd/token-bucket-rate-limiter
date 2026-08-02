@@ -9,21 +9,33 @@ import (
 )
 
 // TestSaveLoadRoundTrip verifies that Save followed by Load reproduces the
-// original PersistedState via a real file on disk.
+// original PersistedState via a real file on disk, covering both tagged
+// LimiterState shapes (token_bucket and sliding_window).
 func TestSaveLoadRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "snapshot.json")
+
+	tbState := limiter.BucketState{
+		Tokens:     2.5,
+		LastRefill: time.Date(2024, 1, 2, 3, 4, 5, 0, time.UTC),
+		Capacity:   5,
+		RefillRate: 1,
+	}
+	swState := limiter.SlidingWindowState{
+		Limit:         5,
+		Window:        time.Second,
+		WindowStart:   time.Date(2024, 1, 2, 3, 4, 5, 0, time.UTC),
+		CurrentCount:  2,
+		PreviousCount: 1,
+	}
 
 	want := limiter.PersistedState{
 		Configs: map[string]limiter.Config{
 			"alice": {RPS: 1, Burst: 5, Algorithm: limiter.AlgorithmTokenBucket},
+			"carol": {RPS: 5, Burst: 5, Algorithm: limiter.AlgorithmSlidingWindow},
 		},
-		Buckets: map[string]limiter.BucketState{
-			"alice": {
-				Tokens:     2.5,
-				LastRefill: time.Date(2024, 1, 2, 3, 4, 5, 0, time.UTC),
-				Capacity:   5,
-				RefillRate: 1,
-			},
+		Limiters: map[string]limiter.LimiterState{
+			"alice": {Algorithm: limiter.AlgorithmTokenBucket, TokenBucket: &tbState},
+			"carol": {Algorithm: limiter.AlgorithmSlidingWindow, SlidingWindow: &swState},
 		},
 	}
 
@@ -36,16 +48,31 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 		t.Fatalf("Load: %v", err)
 	}
 
-	if len(got.Configs) != 1 || got.Configs["alice"] != want.Configs["alice"] {
+	if len(got.Configs) != 2 || got.Configs["alice"] != want.Configs["alice"] || got.Configs["carol"] != want.Configs["carol"] {
 		t.Fatalf("loaded configs = %+v, want %+v", got.Configs, want.Configs)
 	}
-	gotBucket, ok := got.Buckets["alice"]
-	wantBucket := want.Buckets["alice"]
-	if !ok || !gotBucket.LastRefill.Equal(wantBucket.LastRefill) ||
-		gotBucket.Tokens != wantBucket.Tokens ||
-		gotBucket.Capacity != wantBucket.Capacity ||
-		gotBucket.RefillRate != wantBucket.RefillRate {
-		t.Fatalf("loaded bucket state = %+v, want %+v", gotBucket, wantBucket)
+
+	gotAlice, ok := got.Limiters["alice"]
+	if !ok || gotAlice.Algorithm != limiter.AlgorithmTokenBucket || gotAlice.TokenBucket == nil {
+		t.Fatalf("loaded alice limiter state = %+v, want a token_bucket state", gotAlice)
+	}
+	if !gotAlice.TokenBucket.LastRefill.Equal(tbState.LastRefill) ||
+		gotAlice.TokenBucket.Tokens != tbState.Tokens ||
+		gotAlice.TokenBucket.Capacity != tbState.Capacity ||
+		gotAlice.TokenBucket.RefillRate != tbState.RefillRate {
+		t.Fatalf("loaded alice bucket state = %+v, want %+v", gotAlice.TokenBucket, tbState)
+	}
+
+	gotCarol, ok := got.Limiters["carol"]
+	if !ok || gotCarol.Algorithm != limiter.AlgorithmSlidingWindow || gotCarol.SlidingWindow == nil {
+		t.Fatalf("loaded carol limiter state = %+v, want a sliding_window state", gotCarol)
+	}
+	if !gotCarol.SlidingWindow.WindowStart.Equal(swState.WindowStart) ||
+		gotCarol.SlidingWindow.Limit != swState.Limit ||
+		gotCarol.SlidingWindow.Window != swState.Window ||
+		gotCarol.SlidingWindow.CurrentCount != swState.CurrentCount ||
+		gotCarol.SlidingWindow.PreviousCount != swState.PreviousCount {
+		t.Fatalf("loaded carol sliding window state = %+v, want %+v", gotCarol.SlidingWindow, swState)
 	}
 }
 
@@ -59,7 +86,7 @@ func TestLoad_MissingFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load(missing file): got error %v, want nil", err)
 	}
-	if len(got.Configs) != 0 || len(got.Buckets) != 0 {
+	if len(got.Configs) != 0 || len(got.Limiters) != 0 {
 		t.Fatalf("Load(missing file) = %+v, want empty PersistedState", got)
 	}
 }

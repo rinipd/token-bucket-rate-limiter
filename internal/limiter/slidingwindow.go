@@ -60,6 +60,35 @@ func NewSlidingWindow(limit float64, window time.Duration) *SlidingWindow {
 	}
 }
 
+// State returns a snapshot of s's serializable data, safe to call
+// concurrently with Allow.
+func (s *SlidingWindow) State() SlidingWindowState {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return SlidingWindowState{
+		Limit:         s.limit,
+		Window:        s.window,
+		WindowStart:   s.windowStart,
+		CurrentCount:  s.currentCount,
+		PreviousCount: s.previousCount,
+	}
+}
+
+// NewSlidingWindowFromState reconstructs a live SlidingWindow from a
+// previously captured SlidingWindowState, wiring it to the real time.Now
+// clock (the state itself has no clock to restore, since functions aren't
+// serializable).
+func NewSlidingWindowFromState(s SlidingWindowState) *SlidingWindow {
+	return &SlidingWindow{
+		limit:         s.Limit,
+		window:        s.Window,
+		windowStart:   s.WindowStart,
+		currentCount:  s.CurrentCount,
+		previousCount: s.PreviousCount,
+		now:           time.Now,
+	}
+}
+
 // Allow reports the outcome of a request against this sliding window,
 // counting it in the current window if allowed. See Decision for the
 // meaning of each field, and the RetryAfter/ResetAfter note below for how

@@ -9,8 +9,13 @@ func TestConfig_Validate(t *testing.T) {
 		wantErr bool
 	}{
 		{
-			name:    "valid config",
+			name:    "valid token bucket config",
 			cfg:     Config{RPS: 1, Burst: 5, Algorithm: AlgorithmTokenBucket},
+			wantErr: false,
+		},
+		{
+			name:    "valid sliding window config",
+			cfg:     Config{RPS: 1, Burst: 5, Algorithm: AlgorithmSlidingWindow},
 			wantErr: false,
 		},
 		{
@@ -30,7 +35,7 @@ func TestConfig_Validate(t *testing.T) {
 		},
 		{
 			name:    "unknown algorithm",
-			cfg:     Config{RPS: 1, Burst: 5, Algorithm: "sliding_window"},
+			cfg:     Config{RPS: 1, Burst: 5, Algorithm: "leaky_bucket"},
 			wantErr: true,
 		},
 	}
