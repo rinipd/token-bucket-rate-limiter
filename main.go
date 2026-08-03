@@ -10,16 +10,23 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/redis/go-redis/v9"
 	"github.com/rinipd/token-bucket-rate-limiter/internal/httpapi"
 	"github.com/rinipd/token-bucket-rate-limiter/internal/limiter"
 	"github.com/rinipd/token-bucket-rate-limiter/internal/store"
 )
 
+// redisStateTTL bounds how long an idle client's keys live in Redis before
+// expiring, so abandoned clients don't accumulate there forever.
+const redisStateTTL = 1 * time.Hour
+
 // serverConfig holds the environment-configurable settings for main.
 type serverConfig struct {
 	addr             string        // ADDR: address the HTTP server binds to
-	snapshotPath     string        // SNAPSHOT_PATH: file the Manager's state is persisted to
-	snapshotInterval time.Duration // SNAPSHOT_INTERVAL_SECS: how often to snapshot in the background
+	backend          string        // BACKEND: "memory" (default) or "redis"
+	redisAddr        string        // REDIS_ADDR: Redis address, only used when backend is "redis"
+	snapshotPath     string        // SNAPSHOT_PATH: file the Manager's state is persisted to (memory backend only)
+	snapshotInterval time.Duration // SNAPSHOT_INTERVAL_SECS: how often to snapshot in the background (memory backend only)
 }
 
 // loadConfig reads serverConfig from the environment, falling back to
@@ -27,12 +34,20 @@ type serverConfig struct {
 func loadConfig() serverConfig {
 	cfg := serverConfig{
 		addr:             ":8080",
+		backend:          "memory",
+		redisAddr:        "localhost:6379",
 		snapshotPath:     "state.json",
 		snapshotInterval: 5 * time.Second,
 	}
 
 	if v := os.Getenv("ADDR"); v != "" {
 		cfg.addr = v
+	}
+	if v := os.Getenv("BACKEND"); v != "" {
+		cfg.backend = v
+	}
+	if v := os.Getenv("REDIS_ADDR"); v != "" {
+		cfg.redisAddr = v
 	}
 	if v := os.Getenv("SNAPSHOT_PATH"); v != "" {
 		cfg.snapshotPath = v
@@ -106,10 +121,35 @@ func runSnapshotter(ctx context.Context, mgr *limiter.Manager, path string, inte
 func main() {
 	cfg := loadConfig()
 
-	// Create the Manager and recover any state persisted by a previous run
-	// before the server starts serving traffic.
-	mgr := limiter.NewManager()
-	restoreState(mgr, cfg.snapshotPath)
+	// store is whichever backend serves the HTTP handlers below. mgr is only
+	// set for the memory backend — it stays nil for redis — and is used
+	// afterward purely as a "which backend are we running" signal to decide
+	// whether to start/run the periodic-snapshot and final-snapshot steps,
+	// since Snapshot/Restore are Manager-specific and not part of the Store
+	// interface (see store.go).
+	var st limiter.Store
+	var mgr *limiter.Manager
+
+	switch cfg.backend {
+	case "redis":
+		// A Redis-backed store needs no local recovery step and no snapshot
+		// loop: every Allow/SetConfig call already writes straight to Redis,
+		// so Redis itself is the durable state — there is nothing here to
+		// dump to a file or reload from one.
+		client := redis.NewClient(&redis.Options{Addr: cfg.redisAddr})
+		st = limiter.NewRedisStore(client, redisStateTTL)
+		log.Printf("backend: redis (%s)", cfg.redisAddr)
+	default:
+		if cfg.backend != "memory" {
+			log.Printf("unknown BACKEND %q, defaulting to memory", cfg.backend)
+		}
+		mgr = limiter.NewManager()
+		// Recover any state persisted by a previous run before the server
+		// starts serving traffic. Only meaningful for the memory backend.
+		restoreState(mgr, cfg.snapshotPath)
+		st = mgr
+		log.Printf("backend: memory")
+	}
 
 	// Register the health-check route.
 	// The "GET /health" pattern (Go 1.22+) matches only GET requests.
@@ -117,12 +157,13 @@ func main() {
 	mux.HandleFunc("GET /health", healthHandler)
 
 	// Register the admin API (PUT/GET/DELETE /admin/clients/{key}) for
-	// managing per-client config.
-	httpapi.NewAdminHandler(mgr).Register(mux)
+	// managing per-client config. Both handlers take a limiter.Store, so
+	// they work identically regardless of which backend was selected above.
+	httpapi.NewAdminHandler(st).Register(mux)
 
 	// Register the rate-limit check API (GET /check/{key}), which consumes a
 	// token for the given client and reports the outcome via headers.
-	httpapi.NewCheckHandler(mgr).Register(mux)
+	httpapi.NewCheckHandler(st).Register(mux)
 
 	server := &http.Server{
 		Addr:    cfg.addr,
@@ -152,8 +193,11 @@ func main() {
 	}()
 
 	// Snapshot in the background at the configured interval so state
-	// survives an unclean exit, not just a graceful one.
-	go runSnapshotter(ctx, mgr, cfg.snapshotPath, cfg.snapshotInterval)
+	// survives an unclean exit, not just a graceful one. Only the memory
+	// backend has anything to snapshot (mgr is nil for redis).
+	if mgr != nil {
+		go runSnapshotter(ctx, mgr, cfg.snapshotPath, cfg.snapshotInterval)
+	}
 
 	// Block until the shutdown signal arrives.
 	<-ctx.Done()
@@ -172,7 +216,10 @@ func main() {
 	// Take one last snapshot on the way out: the periodic snapshotter above
 	// already stopped (ctx is done), so without this final snapshot, any
 	// state changed since the last tick would be lost even on a clean exit.
-	snapshotOnce(mgr, cfg.snapshotPath)
+	// Skipped entirely for redis, which persists itself as it goes.
+	if mgr != nil {
+		snapshotOnce(mgr, cfg.snapshotPath)
+	}
 
 	log.Printf("shutdown complete")
 }

@@ -11,12 +11,15 @@ import (
 // AdminHandler serves the /admin/clients/{key} routes for managing
 // per-client rate-limit configuration.
 type AdminHandler struct {
-	manager *limiter.Manager
+	manager limiter.Store
 }
 
-// NewAdminHandler returns an AdminHandler backed by mgr.
-func NewAdminHandler(mgr *limiter.Manager) *AdminHandler {
-	return &AdminHandler{manager: mgr}
+// NewAdminHandler returns an AdminHandler backed by store. store is any
+// limiter.Store (the in-memory *limiter.Manager today, potentially a
+// Redis-backed store later) — AdminHandler only needs the four Store
+// methods, so it doesn't care which backend it's given.
+func NewAdminHandler(store limiter.Store) *AdminHandler {
+	return &AdminHandler{manager: store}
 }
 
 // Register wires the admin routes onto mux using Go 1.22+ method+path

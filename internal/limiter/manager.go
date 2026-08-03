@@ -9,6 +9,12 @@ import (
 // has been set for it via SetConfig.
 var DefaultConfig = Config{RPS: 1, Burst: 5, Algorithm: AlgorithmTokenBucket}
 
+// Compile-time assertion that *Manager satisfies Store: if a future change
+// to either type breaks that, this line fails to compile instead of the
+// mismatch surfacing later as a runtime type error somewhere Manager is
+// passed as a Store.
+var _ Store = (*Manager)(nil)
+
 // Manager manages one Limiter per client plus each client's rate-limit
 // Config, creating limiters lazily on first use.
 //

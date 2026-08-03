@@ -12,12 +12,15 @@ import (
 // CheckHandler serves the /check/{key} route for testing a rate-limit
 // decision against a client.
 type CheckHandler struct {
-	manager *limiter.Manager
+	manager limiter.Store
 }
 
-// NewCheckHandler returns a CheckHandler backed by mgr.
-func NewCheckHandler(mgr *limiter.Manager) *CheckHandler {
-	return &CheckHandler{manager: mgr}
+// NewCheckHandler returns a CheckHandler backed by store. store is any
+// limiter.Store (the in-memory *limiter.Manager today, potentially a
+// Redis-backed store later) — CheckHandler only needs Allow, so it doesn't
+// care which backend it's given.
+func NewCheckHandler(store limiter.Store) *CheckHandler {
+	return &CheckHandler{manager: store}
 }
 
 // Register wires the /check route onto mux.
