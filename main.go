@@ -68,7 +68,7 @@ func restoreState(mgr *limiter.Manager, path string) {
 		return
 	}
 	mgr.Restore(snap)
-	log.Printf("restored %d client config(s) and %d bucket(s) from %s", len(snap.Configs), len(snap.Buckets), path)
+	log.Printf("restored %d client config(s) and %d limiter(s) from %s", len(snap.Configs), len(snap.Limiters), path)
 }
 
 // snapshotOnce captures mgr's current state and writes it to path, logging
@@ -81,7 +81,7 @@ func snapshotOnce(mgr *limiter.Manager, path string) {
 		log.Printf("warning: failed to save snapshot to %s: %v", path, err)
 		return
 	}
-	log.Printf("saved snapshot (%d config(s), %d bucket(s)) to %s", len(snap.Configs), len(snap.Buckets), path)
+	log.Printf("saved snapshot (%d config(s), %d limiter(s)) to %s", len(snap.Configs), len(snap.Limiters), path)
 }
 
 // runSnapshotter periodically snapshots mgr to path until ctx is cancelled.
