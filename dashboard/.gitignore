@@ -1,0 +1,14 @@
+# Dependencies
+/node_modules
+
+# Next.js build output
+/.next/
+/out/
+
+# Env files (local overrides; see .env.local.example for the template)
+.env*.local
+
+# Misc
+.DS_Store
+*.tsbuildinfo
+next-env.d.ts

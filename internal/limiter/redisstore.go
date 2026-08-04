@@ -202,6 +202,75 @@ func (s *RedisStore) Allow(clientID string) Decision {
 	}
 }
 
+// recordDecision increments clientID's allowed or denied counter in Redis
+// via HINCRBY, then refreshes the stats key's TTL so an idle client's stats
+// expire like its bucket state does instead of accumulating forever.
+//
+// This is a separate, NON-atomic operation from the token bucket decision
+// itself — a second Redis round trip issued after the Lua script has
+// already committed the actual decision. That's a deliberate tradeoff, not
+// an oversight: the rate limit itself must be exactly correct under
+// concurrency (a double-spent token would let more traffic through than
+// configured, defeating the limiter's whole purpose), which is why it runs
+// as one atomic Lua script. Stats are purely informational — if, say, the
+// process crashed between the script committing and this HINCRBY landing,
+// the reported count would be off by one, but that doesn't change how many
+// requests were actually allowed, only how precisely that number is
+// reported on a dashboard. Paying for a second atomic script on every
+// single request just to protect a display counter isn't worth it.
+func (s *RedisStore) recordDecision(clientID string, allowed bool) {
+	ctx := context.Background()
+	field := "denied"
+	if allowed {
+		field = "allowed"
+	}
+
+	key := statsKey(clientID)
+	if err := s.client.HIncrBy(ctx, key, field, 1).Err(); err != nil {
+		log.Printf("redisstore: recordDecision(%s): %v", clientID, err)
+		return
+	}
+	if err := s.client.Expire(ctx, key, s.ttl).Err(); err != nil {
+		log.Printf("redisstore: recordDecision(%s): refresh TTL: %v", clientID, err)
+	}
+}
+
+// Stats returns a snapshot of every client's cumulative allow/deny counts
+// currently in Redis, by scanning for ratelimit:stats:* keys and reading
+// each hash.
+//
+// This uses SCAN, not KEYS: KEYS walks the entire keyspace in a single
+// blocking call, which on a large Redis instance can stall every other
+// client for the duration it takes to enumerate — unacceptable on a shared
+// production Redis. SCAN instead walks the keyspace incrementally across
+// many small, cheap round trips, each non-blocking, trading one big call
+// for several small ones specifically to avoid that stall.
+func (s *RedisStore) Stats() Stats {
+	ctx := context.Background()
+	out := make(Stats)
+
+	const prefix = "ratelimit:stats:"
+	iter := s.client.Scan(ctx, 0, prefix+"*", 0).Iterator()
+	for iter.Next(ctx) {
+		key := iter.Val()
+		clientID := strings.TrimPrefix(key, prefix)
+
+		fields, err := s.client.HGetAll(ctx, key).Result()
+		if err != nil {
+			log.Printf("redisstore: Stats(): read %s: %v", key, err)
+			continue
+		}
+		allowed, _ := strconv.ParseInt(fields["allowed"], 10, 64)
+		denied, _ := strconv.ParseInt(fields["denied"], 10, 64)
+		out[clientID] = ClientStats{Allowed: allowed, Denied: denied}
+	}
+	if err := iter.Err(); err != nil {
+		log.Printf("redisstore: Stats(): scan error: %v", err)
+	}
+
+	return out
+}
+
 // retryAfterFromRemaining mirrors TokenBucket.retryAfter, computed from a
 // floored remaining-token count instead of an exact fractional one.
 func retryAfterFromRemaining(allowed bool, remaining, rate float64) time.Duration {
