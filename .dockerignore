@@ -1,0 +1,8 @@
+.git
+.gitignore
+state.json
+*.snapshot.json
+dashboard
+node_modules
+*.md
+loadtest
