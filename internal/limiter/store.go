@@ -11,6 +11,12 @@ package limiter
 // it has no equivalent "dump to a PersistedState" operation). They stay as
 // methods on Manager only, used directly by the concrete *Manager the
 // caller constructs — not through the Store interface.
+//
+// Likewise, there is no recordDecision in this interface: counting a
+// decision is an implementation detail private to each backend's Allow
+// (Manager updates its own counts map, RedisStore issues an HINCRBY) —
+// callers of Store never need to invoke it themselves. Store only exposes
+// the read side, Stats, for whoever wants to report on those counts.
 type Store interface {
 	// Allow reports the outcome of a request for clientID, consuming
 	// capacity from that client's limiter if the request is allowed.
@@ -25,4 +31,15 @@ type Store interface {
 
 	// RemoveClient deletes clientID's config (and any limiter state).
 	RemoveClient(clientID string)
+
+	// Stats returns a snapshot of every client's cumulative allow/deny
+	// counts. For Manager this bookkeeping is purely in-process; for
+	// RedisStore it's backed by Redis so multiple server instances sharing
+	// that Redis all see (and contribute to) the same counts. That mirrors
+	// why the limit itself lives in Redis for the distributed case: a
+	// shared rate limit only means something if its state is shared, and
+	// the same is true of reporting on it — without shared stats, each
+	// instance would only ever report the slice of traffic it personally
+	// happened to handle, not the whole picture.
+	Stats() Stats
 }

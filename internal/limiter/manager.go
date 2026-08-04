@@ -28,14 +28,25 @@ type Manager struct {
 	mu       sync.Mutex // protects configs and limiters (the maps, not their contents)
 	configs  map[string]Config
 	limiters map[string]Limiter
+
+	// statsMu protects counts. It's a separate mutex from mu rather than
+	// reusing it: by the time Allow needs to record a decision, mu has
+	// already been released (see Allow's comment on releasing the lock
+	// before calling into the limiter), and stats bookkeeping doesn't need
+	// to be consistent with the configs/limiters maps — only internally
+	// consistent with itself. Re-acquiring mu here would just add
+	// contention to that map lock's hot path for no correctness benefit.
+	statsMu sync.Mutex
+	counts  map[string]ClientStats
 }
 
-// NewManager returns an empty Manager ready to track client configs and
-// limiters.
+// NewManager returns an empty Manager ready to track client configs,
+// limiters, and stats.
 func NewManager() *Manager {
 	return &Manager{
 		configs:  make(map[string]Config),
 		limiters: make(map[string]Limiter),
+		counts:   make(map[string]ClientStats),
 	}
 }
 
@@ -120,7 +131,36 @@ func (m *Manager) Allow(clientID string) Decision {
 	// and the limiter's state is already protected by its own mutex, so
 	// holding m.mu here would only add unnecessary contention across
 	// unrelated clients.
-	return lim.Allow()
+	decision := lim.Allow()
+	m.recordDecision(clientID, decision.Allowed)
+	return decision
+}
+
+// recordDecision increments clientID's allowed or denied counter to reflect
+// this decision. See Manager.statsMu for why this uses its own lock instead
+// of m.mu.
+func (m *Manager) recordDecision(clientID string, allowed bool) {
+	m.statsMu.Lock()
+	defer m.statsMu.Unlock()
+	stats := m.counts[clientID]
+	if allowed {
+		stats.Allowed++
+	} else {
+		stats.Denied++
+	}
+	m.counts[clientID] = stats
+}
+
+// Stats returns a snapshot copy of every client's cumulative allow/deny
+// counts.
+func (m *Manager) Stats() Stats {
+	m.statsMu.Lock()
+	defer m.statsMu.Unlock()
+	out := make(Stats, len(m.counts))
+	for id, s := range m.counts {
+		out[id] = s
+	}
+	return out
 }
 
 // Snapshot captures the current configs and limiter states as a

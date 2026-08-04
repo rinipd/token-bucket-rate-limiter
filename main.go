@@ -165,6 +165,11 @@ func main() {
 	// token for the given client and reports the outcome via headers.
 	httpapi.NewCheckHandler(st).Register(mux)
 
+	// Register the stats API (GET /stats), exposing per-client allow/deny
+	// counts. Works the same for either backend, since Stats is part of
+	// limiter.Store.
+	httpapi.NewStatsHandler(st).Register(mux)
+
 	server := &http.Server{
 		Addr:    cfg.addr,
 		Handler: mux,

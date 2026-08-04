@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -128,6 +129,12 @@ func configKey(clientID string) string {
 	return "ratelimit:config:" + clientID
 }
 
+// statsKey is the Redis hash key holding a client's cumulative allow/deny
+// counts (fields "allowed" and "denied"), incremented by recordDecision.
+func statsKey(clientID string) string {
+	return "ratelimit:stats:" + clientID
+}
+
 // Allow reports the outcome of a request for clientID by running
 // tokenBucketLua against Redis, atomically applying refill/check/consume in
 // one round trip.
@@ -160,12 +167,14 @@ func (s *RedisStore) Allow(clientID string) Decision {
 		// under a Redis outage should invert this deliberately, with that
 		// tradeoff documented at the call site.
 		log.Printf("redisstore: Allow(%s): script error, failing closed (deny): %v", clientID, err)
+		s.recordDecision(clientID, false)
 		return Decision{Allowed: false, Limit: cfg.Burst}
 	}
 
 	values, ok := res.([]interface{})
 	if !ok || len(values) != 3 {
 		log.Printf("redisstore: Allow(%s): unexpected script result %#v, failing closed (deny)", clientID, res)
+		s.recordDecision(clientID, false)
 		return Decision{Allowed: false, Limit: cfg.Burst}
 	}
 	allowedInt, _ := values[0].(int64)
@@ -175,6 +184,8 @@ func (s *RedisStore) Allow(clientID string) Decision {
 	allowed := allowedInt == 1
 	remaining := float64(remainingInt)
 	limit := float64(limitInt)
+
+	s.recordDecision(clientID, allowed)
 
 	return Decision{
 		Allowed:   allowed,
